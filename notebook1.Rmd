@@ -1,0 +1,316 @@
+---
+title: "Prevalence estimation of percentage of women 15-49 classified as having any anemia, by senatorial zones in Nigeria, using the surveyprev package"
+author: "John Omoluabi" 
+---
+
+## import required libraries
+
+```{r}
+library(shapefiles)
+library(surveyPrev)
+library(dplyr)
+library(labelled)
+library(kableExtra)
+library(sf)
+library(sn)
+library(ggplot2)
+library(tidyverse)  # most variable creation here uses tidyverse 
+library(tidyselect) # used to select variables in FP_EVENTS.R
+library(haven)      # used for Haven labeled DHS variables
+library(labelled)   # used for Haven labeled variable creation
+library(expss)    # for creating tables with Haven labeled data
+library(xlsx)     # for exporting to excel
+library(naniar)   # to use replace_with_na function
+library(here)       # to get R project path
+library(sjlabelled) # to set variables label
+library(survey)  # to calculate weighted ratio for GAR
+library(srvyr)
+library(oce)
+```
+
+## Prevalence estimation using the direct estimation model
+
+### import state level administrative boundary (admin 1)
+
+```{r}
+admin1.shapefile<-read_sf("boundary_states_export/boundary_states_export.shp")
+
+```
+
+### import the our nigeria senatorial zones shapefile
+
+```{r}
+# sz.shapefile<-read_sf("nga_lga_senatorial/Nigeria_Senatorial Zone_ADJUSTED.shp")
+sz.shapefile<-read_sf("boundary_lga_senatorial_zone_edited/Nigeria_Senatorial Zone.shp")
+```
+
+### uniformity check:
+
+```{r}
+admin1.shapefile$StateName[admin1.shapefile$StateName=="Federal Capital Territory"]<-"fct"
+admin1.shapefile$StateName[admin1.shapefile$StateName=="NASARAWA"]<-"NASSARAWA"
+admin1.shapefile$StateName<-toupper(admin1.shapefile$StateName)
+sz.shapefile$Senatorial[sz.shapefile$Senatorial=="FEDERAL CAPITAL TERRITORY"]<-"FCT"
+
+```
+
+### uniformity check:
+
+```{r}
+test.a<-table(rep(admin1.shapefile$StateName))
+test.b<-table(rep(sz.shapefile$`State name`))
+
+test.a<-data.frame(test.a)
+test.b<-data.frame(test.b)
+
+test.a<-test.a[order(test.a$Var1, decreasing=FALSE),]
+test.b<-test.b[order(test.b$Var1, decreasing=FALSE),]
+
+print(data.frame(admin1=test.a$Var1,sz=test.b$Var1))
+
+levels(test.a$Var1)==levels(test.b$Var1)
+```
+
+They appear to be uniform
+
+## import cluster gps locations shapefile
+
+```{r}
+cluster.gps.shapefile <-read_sf("cluster_gps/geo_check.shp")
+cluster.gps.shapefile$ADM1NAME[cluster.gps.shapefile$ADM1NAME=="FCT ABUJA"]<-"FCT"
+cluster.gps.shapefile$ADM1NAME[cluster.gps.shapefile$ADM1NAME=="NASARAWA"]<-"NASSARAWA"
+
+```
+
+## generate cluster information, taking cluster gps, admin 1 boundary and senatorial zone boundary as parameters
+
+```{r}
+sz.cluster.info <- clusterInfo(geo=cluster.gps.shapefile, 
+                               poly.adm1=admin1.shapefile, 
+                               poly.adm2=sz.shapefile,
+                               by.adm1 = "StateName", # join by "StateName" and "NAME_1_5" from two boundary shapefiles
+                               by.adm2 = "Senatorial")
+```
+
+## function to check for the correctness of the cluster info exercise.
+
+```{r}
+check_join<-function(i){
+  input<-str_split(i,"_")
+  x<-grepl(input[[1]][1],input[[1]][2],fixed=TRUE)
+  if(x!=TRUE){
+    TRUE
+    }
+  else{
+    FALSE
+  }
+  
+}
+sz.cluster.info$data$check_err<-map(sz.cluster.info$data$admin2.name.full,check_join)
+sz.cluster.info$data$check_err<-unlist(sz.cluster.info$data$check_err)
+
+```
+
+```{r}
+E<-sz.cluster.info$data[sz.cluster.info$data$check_err==TRUE,]
+E
+sf::st_write(E,"outputs/E.shp")
+
+E<-read_sf("outputs/E.shp")
+E
+error.clusters<-E$cluster
+error.clusters
+```
+
+```{r}
+sz.cluster.info$data[sz.cluster.info$data$check_err==TRUE,]
+```
+
+*the above must amount to an empty dataframe to be correct. means that there are no errors.*
+
+## run direct estimation model
+
+```{r}
+result <- directEST(data = data,
+                       cluster.info =sz.cluster.info,
+                       admin = 2,
+                       aggregation = FALSE
+                       )
+```
+
+```{r}
+print(result$res.admin2)
+```
+
+visualize the direct estimate coefficient of variation
+
+```{r}
+result$res.admin2$Senatorial<-result$res.admin2$admin2.name
+res.gps<-inner_join(result$res.admin2,sz.shapefile,by=NULL,) #join the result with cluster gps
+sf::st_write(res.gps,"outputs/result_4-12-24.shp")
+res.gps<-read_sf("outputs/result_4-12-24.shp")
+plot(res.gps[,c("drct_st","cv")])
+```
+
+```{r}
+result_nar$res.admin2$Senatorial<-result_nar$res.admin2$admin2.name
+res_nar.gps<-inner_join(result_nar$res.admin2,sz.shapefile,by=NULL,)
+sf::st_write(res_nar.gps,"outputs/result_nar_4-12-24.shp")
+res_nar.gps<-read_sf("outputs/result_nar_4-12-24.shp")
+plot(res_nar.gps[,c("drct_st","cv")])
+```
+
+```{r}
+res_nar.gps
+```
+
+## CUSTOM INDICATOR (ATTENDING PRIMARY SCHOOL)
+
+#### get dhs data needed for out indicator, Houshold recode, births recode and household member recode
+
+```{r}
+year <- 2018
+country <- "Nigeria"
+nar.gar.Data <- getDHSdata(country = country, 
+                      indicator = NULL,
+                      Recode = c("Household Member Recode","Births Recode","Household Recode"), 
+                      year = year)
+```
+
+### FUNCTION DEFINITION
+
+```{r}
+
+######################################################
+# for 2018 survey, school starts in september (9th month)
+school_start_yr = 2018
+school_start_mo = 9
+# also we need the age ranges for primary and secondary
+# for example, for Nigeria 2018, the age range is 6-11 for primary school and 13-18 for secondary school
+age_prim_min = 6
+age_prim_max = 11
+age_sec_min = 13
+age_sec_max = 18
+HRdata<-nar.gar.Data$`Household Recode`
+binary.indicator.gen <- function(BRdata,PRdata) {
+  temp <- BRdata
+  
+  # keep only the variables we need
+  temp <- (BRdata[, c("v001", "v002","v003", "b3", "b16")])
+  
+  # drop if the child in the birth history was not in the household or not alive 
+  temp <- temp %>%
+    filter(b16!=0 & !is.na(b16))
+  
+  # rename key variables for matching 
+  temp[["hvidx"]] <- temp[["b16"]]  
+  temp[["hv001"]] <- temp[["v001"]]
+  temp[["hv002"]] <- temp[["v002"]]
+  temp <- (temp[, c("hvidx", "hv001", "hv002", "b3", "b16")])
+  
+  # sort on key variables 
+  temp <- temp[order(temp$hv001, temp$hv002, temp$hvidx),]
+  
+  # if there are some duplicates of line number in household questionnaire, we need to drop the duplicates
+  temp <- temp[!duplicated(temp[,c("hvidx", "hv001", "hv002")]),]
+  
+  # use the PR file for household members for the NAR and GAR indicators
+  BR_PMRdata <- merge(PRdata, temp, by = c("hv001", "hv002", "hvidx"), all.y = FALSE, all.x = TRUE)
+  
+  #restrict to de facto household members age 5-24, and drop all others
+  BR_PMRdata <- BR_PMRdata %>%
+    filter(hv103==1 & inrange(hv105,5,24))
+  
+  
+  # produce century month code of start of school year for each state and phase
+  cmcSch = (school_start_yr - 1900)*12 + school_start_mo
+  
+  # calculate the age at the start of the school year, using the date of birth from the birth history if we have it
+  # Impute an age at the beginning of the school year when CMC of birth is unknown
+  # the random imputation below means that we won't get a perfect match with the report, but it will be close
+  BR_PMRdata[["xtemp"]] <- ifelse(is.na(BR_PMRdata[["b3"]]), BR_PMRdata[["hv008"]] - (BR_PMRdata[["hv105"]]*12), 0)
+  BR_PMRdata[["cmctemp"]] <- ifelse(is.na(BR_PMRdata[["b3"]]), BR_PMRdata[["xtemp"]] - as.integer(runif(1, 0, 1)*12), 0)
+  BR_PMRdata[["school_age"]] <- ifelse(is.na(BR_PMRdata[["b3"]]), 
+                                       as.integer((cmcSch - BR_PMRdata[["cmctemp"]])/12), 
+                                       as.integer((cmcSch - BR_PMRdata[["b3"]])/12))
+  
+  # Generate variables for whether the child is in the age group for primary or secondary school
+  BR_PMRdata[["prim_age"]] <- ifelse(inrange(BR_PMRdata[["school_age"]],age_prim_min,age_prim_max), 1, 0)
+  BR_PMRdata[["sec_age"]] <- ifelse(inrange(BR_PMRdata[["school_age"]],age_sec_min,age_sec_max),1, 0)
+  
+  # create the school attendance variables, not restricted by age
+  BR_PMRdata[["prim"]] <- ifelse(BR_PMRdata[["hv122"]]==1, 1, 0)
+  BR_PMRdata[["sec"]] <- ifelse(BR_PMRdata[["hv122"]]==2, 1, 0)
+  
+  # set sample weight
+  BR_PMRdata[["wt"]] = BR_PMRdata[["hv005"]]/1000000
+  
+  # For NAR we can use this as just regular variables and can tabulate as follows, but can't do this for GAR as the numerator is not a subset of the denominator
+  # NAR is just the proportion attending primary/secondary school of children in the correct age range, for de facto children 
+  BR_PMRdata[["nar_prim"]] <- ifelse(BR_PMRdata[["prim_age"]]==1, BR_PMRdata[["prim"]], 0)
+  BR_PMRdata[["nar_sec"]] <- ifelse(BR_PMRdata[["sec_age"]]==1, BR_PMRdata[["sec"]], 0)
+  
+  BR_PMRdata <- BR_PMRdata %>%
+    mutate(nar_prim = set_label(nar_prim, label = "Primary school net attendance ratio (NAR)"),
+           nar_sec = set_label(nar_sec, label = "Secondary school net attendance ratio (NAR)"))
+
+  return(BR_PMRdata)
+}
+
+```
+
+#### generate indicator
+
+```{r}
+pre.data<-binary.indicator.gen(BRdata=BRdata,PRdata=PRdata)
+```
+
+#### create our dud function, apparently we cannot do without it
+
+```{r}
+make.value <- function(input) {
+    # set_variable_labels(ph_sch_nar_prim = "Primary school net attendance ration (nar)")
+  # colnames(BR_PMRdata)[colnames(BR_PMRdata) == "nar_prim"] <- "value"
+  return(input)
+}
+```
+
+## Run direct Estimates
+
+```{r}
+
+# this is redundant
+pre.data$value<-0
+
+pre.data$value[(pre.data$prim_age==1)&(pre.data$prim==1)]<-1
+
+pre.data.prim<-pre.data %>% filter(prim_age==1)
+
+# sz.data <- getDHSindicator(pre.data, indicator = NULL,FUN=make.value)
+sz.data <- getDHSindicator(pre.data.prim, indicator = NULL,FUN=make.value) # denominator is all 6-11 year olds
+
+
+
+# result.sz <- directEST(data = data.11,
+#                        cluster.info =sz.cluster.info,
+#                        admin = 2,
+#                        aggregation = FALSE
+# )
+result.sz <- directEST(data = sz.data,
+                       cluster.info =sz.cluster.info,
+                       admin = 2,
+                       aggregation = FALSE
+)
+
+
+```
+
+## Visualize senatorial zone results
+
+```{r}
+result.sz$res.admin2$Senatorial<-result.sz$res.admin2$admin2.name
+res.gps<-inner_join(result.sz$res.admin2,sz.shapefile,by=NULL,) #join the result with cluster gps
+sf::st_write(res.gps,"outputs/result_11-12-24.shp")
+res.gps<-read_sf("outputs/result_11-12-24.shp")
+plot(res.gps[,c("drct_st","cv")])
+```
